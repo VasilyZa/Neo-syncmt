@@ -1,0 +1,223 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-dev musl-tools g++-multilib dpkg-dev liburing-dev
+          echo "=== Finding liburing static library ==="
+          ls -la /usr/lib/x86_64-linux-gnu/liburing.a 2>/dev/null || echo "liburing.a not found in /usr/lib/x86_64-linux-gnu/"
+          ls -la /usr/lib/liburing.a 2>/dev/null || echo "liburing.a not found in /usr/lib/"
+          echo "=== Finding C++ include path ==="
+          find /usr/include -name "iostream" 2>/dev/null | head -10
+          echo "=== GCC include paths ==="
+          g++ -E -x c++ -v - < /dev/null 2>&1 | grep -A 20 "include.*search"
+
+      - name: Download and install Clang 22
+        run: |
+          sudo apt-get install -y aria2
+          mkdir -p clang
+          cd clang
+          aria2c -s16 -x16 --log-level=error https://github.com/ZyCromerZ/Clang/releases/download/22.0.0git-20250928-release/Clang-22.0.0git-20250928.tar.gz
+          tar xf Clang-22.0.0git-20250928.tar.gz
+          echo "=== Directory Structure ==="
+          ls -la
+          echo "=== Bin directory contents ==="
+          ls -la bin/
+          echo "=== Finding clang++ binary ==="
+          find . -name "clang++" -type f
+          echo "=== Clang Directory Structure ==="
+          find . -type d -name "include" | head -20
+          echo "CLANG_DIR=$(pwd)" >> $GITHUB_ENV
+          echo "$(pwd)/bin" >> $GITHUB_PATH
+          echo "=== PATH ==="
+          echo $PATH
+          echo "=== Clang Version ==="
+          clang++ --version
+          echo "Clang 22 installed successfully"
+
+      - name: Get commit hash
+        id: commit
+        run: |
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "hash=${COMMIT_HASH}" >> $GITHUB_OUTPUT
+          echo "Commit hash: ${COMMIT_HASH}"
+
+      - name: Build with Makefile
+        run: |
+          VERSION="${{ inputs.version }}"
+          COMMIT="${{ steps.commit.outputs.hash }}"
+          BUILD_DATE=$(date +%Y-%m-%d)
+          BINARY_NAME="syncmt-${VERSION}-linux-x86_64"
+
+          echo "Building version: ${VERSION}"
+          echo "Git commit: ${COMMIT}"
+          echo "Build date: ${BUILD_DATE}"
+          echo "Binary name: ${BINARY_NAME}"
+          echo "=== Compiler Info ==="
+          ${{ github.workspace }}/clang/bin/clang++ --version
+          echo "=== Checking liburing library ==="
+          ls -la /usr/lib/x86_64-linux-gnu/liburing.a 2>/dev/null || ls -la /usr/lib/liburing.a 2>/dev/null || echo "liburing.a not found"
+
+          echo "=== Building with Makefile ==="
+          make clean || true
+          make \
+            CXX="${{ github.workspace }}/clang/bin/clang++" \
+            CXXFLAGS="-std=c++20 -Wall -Wextra -O3 -Wno-unused-variable -Wno-sign-compare -Wno-unused-private-field --target=x86_64-linux-musl" \
+            LDFLAGS="-static -pthread -Wl,--whole-archive /usr/lib/x86_64-linux-gnu/liburing.a -Wl,--no-whole-archive" \
+            VERSION="${VERSION}" \
+            GIT_COMMIT="${COMMIT}" \
+            BUILD_DATE="${BUILD_DATE}"
+
+          cp bin/syncmt ${BINARY_NAME}
+          ls -lh ${BINARY_NAME}
+          file ${BINARY_NAME}
+
+          echo "BINARY_NAME=${BINARY_NAME}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "COMMIT=${COMMIT}" >> $GITHUB_ENV
+
+      - name: Create .deb package
+        run: |
+          VERSION="${{ env.VERSION }}"
+          PACKAGE_NAME="syncmt_${VERSION}_amd64.deb"
+
+          echo "=== Creating .deb package ==="
+
+          mkdir -p package/DEBIAN
+          mkdir -p package/usr/local/bin
+          mkdir -p package/usr/share/doc/syncmt
+
+          echo "Package: syncmt" > package/DEBIAN/control
+          echo "Version: ${VERSION}" >> package/DEBIAN/control
+          echo "Section: utils" >> package/DEBIAN/control
+          echo "Priority: optional" >> package/DEBIAN/control
+          echo "Architecture: amd64" >> package/DEBIAN/control
+          echo "Maintainer: syncmt contributors" >> package/DEBIAN/control
+          echo "Installed-Size: 1024" >> package/DEBIAN/control
+          echo "Homepage: https://github.com/yourusername/syncmt" >> package/DEBIAN/control
+          echo "Description: High-performance multi-threaded file copy utility" >> package/DEBIAN/control
+          echo " syncmt is a high-performance, multi-threaded file copy and move" >> package/DEBIAN/control
+          echo " utility for Linux x86_64. It features:" >> package/DEBIAN/control
+          echo "  - Zero-copy file transfer using sendfile system call" >> package/DEBIAN/control
+          echo "  - Native Linux system calls for directory scanning" >> package/DEBIAN/control
+          echo "  - Pipeline processing for parallel scanning and copying" >> package/DEBIAN/control
+          echo "  - Batch task submission for improved throughput" >> package/DEBIAN/control
+          echo "  - File space pre-allocation with fallocate" >> package/DEBIAN/control
+          echo "  - Adaptive chunk size optimization" >> package/DEBIAN/control
+          echo "  - Directory caching to avoid redundant checks" >> package/DEBIAN/control
+
+          echo "#!/bin/bash" > package/DEBIAN/postinst
+          echo "set -e" >> package/DEBIAN/postinst
+          echo "" >> package/DEBIAN/postinst
+          echo "echo \"syncmt has been installed successfully!\"" >> package/DEBIAN/postinst
+          echo "echo \"Usage: syncmt [OPTIONS] <source>... <destination>\"" >> package/DEBIAN/postinst
+          echo "echo \"Run 'syncmt -h' for more information.\"" >> package/DEBIAN/postinst
+          chmod 755 package/DEBIAN/postinst
+
+          cp ${{ env.BINARY_NAME }} package/usr/local/bin/syncmt
+          chmod 755 package/usr/local/bin/syncmt
+
+          echo "syncmt - High-Performance Multi-Threaded File Copy Utility" > package/usr/share/doc/syncmt/README
+          echo "" >> package/usr/share/doc/syncmt/README
+          echo "INSTALLATION" >> package/usr/share/doc/syncmt/README
+          echo "------------" >> package/usr/share/doc/syncmt/README
+          echo "The binary has been installed to /usr/local/bin/syncmt" >> package/usr/share/doc/syncmt/README
+          echo "" >> package/usr/share/doc/syncmt/README
+          echo "USAGE" >> package/usr/share/doc/syncmt/README
+          echo "-----" >> package/usr/share/doc/syncmt/README
+          echo "Basic usage:" >> package/usr/share/doc/syncmt/README
+          echo "  syncmt /path/to/source /path/to/destination" >> package/usr/share/doc/syncmt/README
+          echo "" >> package/usr/share/doc/syncmt/README
+          echo "Options:" >> package/usr/share/doc/syncmt/README
+          echo "  -t, --threads <num>   Number of threads (default: 4)" >> package/usr/share/doc/syncmt/README
+          echo "  -m, --move            Move files instead of copying" >> package/usr/share/doc/syncmt/README
+          echo "  -v, --verbose         Enable verbose output" >> package/usr/share/doc/syncmt/README
+          echo "  -o, --overwrite       Overwrite existing files" >> package/usr/share/doc/syncmt/README
+          echo "  -s, --skip            Skip existing files" >> package/usr/share/doc/syncmt/README
+          echo "  -h, --help            Show help message" >> package/usr/share/doc/syncmt/README
+          echo "  -V, --version         Print version information" >> package/usr/share/doc/syncmt/README
+          echo "" >> package/usr/share/doc/syncmt/README
+          echo "EXAMPLES" >> package/usr/share/doc/syncmt/README
+          echo "--------" >> package/usr/share/doc/syncmt/README
+          echo "Copy a directory:" >> package/usr/share/doc/syncmt/README
+          echo "  syncmt /home/user/documents /backup" >> package/usr/share/doc/syncmt/README
+          echo "" >> package/usr/share/doc/syncmt/README
+          echo "Copy with 8 threads:" >> package/usr/share/doc/syncmt/README
+          echo "  syncmt -t 8 /source /destination" >> package/usr/share/doc/syncmt/README
+          echo "" >> package/usr/share/doc/syncmt/README
+          echo "Move files:" >> package/usr/share/doc/syncmt/README
+          echo "  syncmt -m /source /destination" >> package/usr/share/doc/syncmt/README
+          echo "" >> package/usr/share/doc/syncmt/README
+          echo "PERFORMANCE OPTIMIZATIONS" >> package/usr/share/doc/syncmt/README
+          echo "------------------------" >> package/usr/share/doc/syncmt/README
+          echo "- Zero-copy file transfer using sendfile" >> package/usr/share/doc/syncmt/README
+          echo "- Native Linux system calls (opendir/readdir)" >> package/usr/share/doc/syncmt/README
+          echo "- Pipeline processing for parallel operations" >> package/usr/share/doc/syncmt/README
+          echo "- Batch task submission" >> package/usr/share/doc/syncmt/README
+          echo "- File space pre-allocation" >> package/usr/share/doc/syncmt/README
+          echo "- Adaptive chunk size" >> package/usr/share/doc/syncmt/README
+          echo "- Directory caching" >> package/usr/share/doc/syncmt/README
+          echo "" >> package/usr/share/doc/syncmt/README
+          echo "For more information, visit the project repository." >> package/usr/share/doc/syncmt/README
+
+          dpkg-deb --build package ${PACKAGE_NAME}
+          ls -lh ${PACKAGE_NAME}
+          file ${PACKAGE_NAME}
+
+          echo "DEB_PACKAGE=${PACKAGE_NAME}" >> $GITHUB_ENV
+
+      - name: Create Release and Upload Asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "## Release v${{ env.VERSION }}" > release_notes.txt
+          echo "" >> release_notes.txt
+          echo "### Build Information" >> release_notes.txt
+          echo "- **Version**: ${{ env.VERSION }}" >> release_notes.txt
+          echo "- **Commit**: ${{ env.COMMIT }}" >> release_notes.txt
+          echo "- **Compiler**: Clang 22 with musl-static" >> release_notes.txt
+          echo "- **Platform**: Linux x86_64" >> release_notes.txt
+          echo "- **Build Date**: $(TZ='Asia/Shanghai' date +\"%Y-%m-%d %H:%M:%S UTC+8\")" >> release_notes.txt
+          echo "" >> release_notes.txt
+          echo "### Binaries" >> release_notes.txt
+          echo "- \`${{ env.BINARY_NAME }}\`: Static linked binary for Linux x86_64" >> release_notes.txt
+          echo "- \`${{ env.DEB_PACKAGE }}\`: Debian package (.deb) for easy installation" >> release_notes.txt
+          echo "" >> release_notes.txt
+          echo "### Installation" >> release_notes.txt
+          echo "**Using .deb package (recommended):**" >> release_notes.txt
+          echo "\`\`\`bash" >> release_notes.txt
+          echo "sudo dpkg -i ${{ env.DEB_PACKAGE }}" >> release_notes.txt
+          echo "\`\`\`" >> release_notes.txt
+          echo "" >> release_notes.txt
+          echo "**Using static binary:**" >> release_notes.txt
+          echo "\`\`\`bash" >> release_notes.txt
+          echo "chmod +x ${{ env.BINARY_NAME }}" >> release_notes.txt
+          echo "sudo mv ${{ env.BINARY_NAME }} /usr/local/bin/syncmt" >> release_notes.txt
+          echo "\`\`\`" >> release_notes.txt
+
+          echo "=== Creating Release v${{ env.VERSION }} ==="
+          gh release create v${{ env.VERSION }} \
+            --title "Release v${{ env.VERSION }}" \
+            --notes-file release_notes.txt \
+            ./${{ env.BINARY_NAME }} \
+            ./${{ env.DEB_PACKAGE }}
