@@ -7,8 +7,7 @@ ThreadPool::ThreadPool(size_t num_threads, std::atomic<size_t>* processed_files_
            bool verbose, std::unordered_set<fs::path>* created_dirs_ptr)
     : stop(false), processed_files_ptr(processed_files_ptr),
       copied_bytes_ptr(copied_bytes_ptr), conflict_resolution(conflict_resolution),
-      verbose(verbose), created_dirs_ptr(created_dirs_ptr),
-      async_io(256) {
+      verbose(verbose), created_dirs_ptr(created_dirs_ptr) {
     workers.reserve(num_threads);
     for (size_t i = 0; i < num_threads; ++i) {
         workers.emplace_back([this] {
@@ -28,13 +27,6 @@ ThreadPool::ThreadPool(size_t num_threads, std::atomic<size_t>* processed_files_
             }
         });
     }
-
-    event_processor = std::thread([this] {
-        while (!stop) {
-            async_io.process_events();
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
-        }
-    });
 }
 
 ThreadPool::~ThreadPool() {
@@ -45,8 +37,6 @@ ThreadPool::~ThreadPool() {
     condition.notify_all();
     for (std::thread &worker : workers)
         worker.join();
-    if (event_processor.joinable())
-        event_processor.join();
 }
 
 void ThreadPool::enqueue(FileTask task) {
@@ -141,6 +131,7 @@ void ThreadPool::copy_file(const fs::path& src, const fs::path& dst, std::unorde
 
     fs::path dst_parent = dst.parent_path();
     if (!dst_parent.empty()) {
+        std::lock_guard<std::mutex> lock(created_dirs_mutex);
         if (created_dirs.find(dst_parent) == created_dirs.end()) {
             if (!fs::exists(dst_parent)) {
                 fs::create_directories(dst_parent);
@@ -162,7 +153,18 @@ void ThreadPool::copy_file(const fs::path& src, const fs::path& dst, std::unorde
     }
 
     if (src_stat.st_size > 0) {
-        copy_file_async(src_fd.get(), dst_fd.get(), src_stat.st_size);
+        off_t offset = 0;
+        size_t remaining = src_stat.st_size;
+        while (remaining > 0) {
+            ssize_t sent = sendfile(dst_fd.get(), src_fd.get(), &offset, remaining);
+            if (sent <= 0) {
+                if (sent == -1 && errno == EINTR) continue;
+                throw std::runtime_error(std::string("sendfile failed: ") + src.string() +
+                                       " (errno: " + std::to_string(errno) +
+                                       " - " + strerror(errno) + ")");
+            }
+            remaining -= sent;
+        }
     }
 
     struct timespec times[2];
@@ -171,39 +173,10 @@ void ThreadPool::copy_file(const fs::path& src, const fs::path& dst, std::unorde
     utimensat(AT_FDCWD, dst.c_str(), times, 0);
 }
 
-void ThreadPool::copy_file_async(int src_fd, int dst_fd, uint64_t file_size) {
-    std::atomic<bool> completed{false};
-    std::atomic<uint64_t> copied{0};
-    std::atomic<bool> has_error{false};
-    std::string error_msg;
-
-    auto progress_cb = [&copied](uint64_t bytes_copied) {
-        copied.store(bytes_copied);
-    };
-
-    auto completion_cb = [&completed]() {
-        completed.store(true);
-    };
-
-    auto error_cb = [&has_error, &error_msg](const std::string& msg) {
-        has_error.store(true);
-        error_msg = msg;
-    };
-
-    async_io.async_copy(src_fd, dst_fd, file_size, progress_cb, completion_cb, error_cb);
-
-    while (!completed.load() && !has_error.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    if (has_error.load()) {
-        throw std::runtime_error(error_msg);
-    }
-}
-
 void ThreadPool::move_file(const fs::path& src, const fs::path& dst, std::unordered_set<fs::path>& created_dirs) {
     fs::path dst_parent = dst.parent_path();
     if (!dst_parent.empty()) {
+        std::lock_guard<std::mutex> lock(created_dirs_mutex);
         if (created_dirs.find(dst_parent) == created_dirs.end()) {
             if (!fs::exists(dst_parent)) {
                 fs::create_directories(dst_parent);

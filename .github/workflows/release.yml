@@ -23,10 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-dev musl-tools g++-multilib dpkg-dev liburing-dev
-          echo "=== Finding liburing static library ==="
-          ls -la /usr/lib/x86_64-linux-gnu/liburing.a 2>/dev/null || echo "liburing.a not found in /usr/lib/x86_64-linux-gnu/"
-          ls -la /usr/lib/liburing.a 2>/dev/null || echo "liburing.a not found in /usr/lib/"
+          sudo apt-get install -y musl-dev musl-tools g++-multilib dpkg-dev
           echo "=== Finding C++ include path ==="
           find /usr/include -name "iostream" 2>/dev/null | head -10
           echo "=== GCC include paths ==="
@@ -75,15 +72,12 @@ jobs:
           echo "Binary name: ${BINARY_NAME}"
           echo "=== Compiler Info ==="
           ${{ github.workspace }}/clang/bin/clang++ --version
-          echo "=== Checking liburing library ==="
-          ls -la /usr/lib/x86_64-linux-gnu/liburing.a 2>/dev/null || ls -la /usr/lib/liburing.a 2>/dev/null || echo "liburing.a not found"
-
           echo "=== Building with Makefile ==="
           make clean || true
           make \
             CXX="${{ github.workspace }}/clang/bin/clang++" \
             CXXFLAGS="-std=c++20 -Wall -Wextra -O3 -Wno-unused-variable -Wno-sign-compare -Wno-unused-private-field --target=x86_64-linux-musl" \
-            LDFLAGS="-static -pthread -Wl,--whole-archive /usr/lib/x86_64-linux-gnu/liburing.a -Wl,--no-whole-archive" \
+            LDFLAGS="-static -pthread" \
             VERSION="${VERSION}" \
             GIT_COMMIT="${COMMIT}" \
             BUILD_DATE="${BUILD_DATE}"

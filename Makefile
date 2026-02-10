@@ -2,11 +2,11 @@
 
 # Compiler and flags
 CXX := g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -O3 -march=native
-LDFLAGS := -pthread -luring
+CXXFLAGS := -std=c++17 -Wall -Wextra -O3 -march=haswell
+LDFLAGS := -pthread
 
 # Version info
-VERSION ?= 1.1.3
+VERSION ?= 1.6.0
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE ?= $(shell date +%Y-%m-%d)
 
@@ -21,8 +21,8 @@ BIN_DIR := bin
 # Include path
 INCLUDES := -I$(INC_DIR)
 
-# Source files
-SRCS := $(wildcard $(SRC_DIR)/*.cpp)
+# Source files (exclude async_io.cpp - no longer used)
+SRCS := $(filter-out $(SRC_DIR)/async_io.cpp, $(wildcard $(SRC_DIR)/*.cpp))
 OBJS := $(SRCS:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
 
 # Target
@@ -50,8 +50,7 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
 # Dependencies
 $(BUILD_DIR)/main.o: $(SRC_DIR)/main.cpp $(INC_DIR)/common.h $(INC_DIR)/file_copier.h
 $(BUILD_DIR)/common.o: $(SRC_DIR)/common.cpp $(INC_DIR)/common.h
-$(BUILD_DIR)/async_io.o: $(SRC_DIR)/async_io.cpp $(INC_DIR)/async_io.h $(INC_DIR)/common.h
-$(BUILD_DIR)/thread_pool.o: $(SRC_DIR)/thread_pool.cpp $(INC_DIR)/thread_pool.h $(INC_DIR)/common.h $(INC_DIR)/file_descriptor.h $(INC_DIR)/async_io.h
+$(BUILD_DIR)/thread_pool.o: $(SRC_DIR)/thread_pool.cpp $(INC_DIR)/thread_pool.h $(INC_DIR)/common.h $(INC_DIR)/file_descriptor.h
 $(BUILD_DIR)/file_copier.o: $(SRC_DIR)/file_copier.cpp $(INC_DIR)/file_copier.h $(INC_DIR)/common.h $(INC_DIR)/thread_pool.h
 
 # Clean
@@ -66,7 +65,7 @@ debug: clean $(TARGET)
 
 # Release build with static linking
 .PHONY: release
-release: LDFLAGS := -pthread -luring -static
+release: LDFLAGS := -pthread -static
 release: clean $(TARGET)
 
 # Install

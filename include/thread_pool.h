@@ -3,7 +3,6 @@
 
 #include "common.h"
 #include "file_descriptor.h"
-#include "async_io.h"
 
 class ThreadPool {
 public:
@@ -25,14 +24,12 @@ private:
     ConflictResolution conflict_resolution;
     bool verbose;
     std::unordered_set<fs::path>* created_dirs_ptr;
-    std::thread event_processor;
-    AsyncIO async_io;
+    std::mutex created_dirs_mutex;
 
     [[nodiscard]] static size_t calculate_chunk_size(uint64_t file_size);
 
     void process_task(const FileTask& task);
     void copy_file(const fs::path& src, const fs::path& dst, std::unordered_set<fs::path>& created_dirs);
-    void copy_file_async(int src_fd, int dst_fd, uint64_t file_size);
     void move_file(const fs::path& src, const fs::path& dst, std::unordered_set<fs::path>& created_dirs);
 
     static std::mutex cout_mutex;
